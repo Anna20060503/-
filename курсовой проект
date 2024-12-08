@@ -1,0 +1,419 @@
+import sys
+import sqlite3
+from PyQt6 import QtWidgets
+from PyQt6.QtWidgets import QMessageBox, QTableWidgetItem
+
+class Database:
+    def __init__(self):
+        self.connection = sqlite3.connect('teachers_system.db')
+        self.cursor = self.connection.cursor()
+        self.create_tables()
+
+    def create_tables(self):
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                role TEXT NOT NULL  -- 'teacher' or 'student'
+            )
+        ''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS courses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                teacher_id INTEGER,
+                FOREIGN KEY (teacher_id) REFERENCES users (id)
+            )
+        ''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                course_id INTEGER,
+                date TEXT,
+                time TEXT,
+                location TEXT,
+                FOREIGN KEY (course_id) REFERENCES courses (id)
+            )
+        ''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS homework (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                course_id INTEGER,
+                title TEXT,
+                description TEXT,
+                deadline TEXT,
+                FOREIGN KEY (course_id) REFERENCES courses (id)
+            )
+        ''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS student_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_name TEXT NOT NULL,
+                student_id INTEGER,
+                FOREIGN KEY (student_id) REFERENCES users (id)
+            )
+        ''')
+        self.connection.commit()
+
+    def register_user(self, username, password, role):
+        try:
+            self.cursor.execute('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', (username, password, role))
+            self.connection.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def login_user(self, username, password):
+        self.cursor.execute('SELECT * FROM users WHERE username = ? AND password = ?', (username, password))
+        return self.cursor.fetchone()
+
+    def add_course(self, title, description, teacher_id):
+        self.cursor.execute('INSERT INTO courses (title, description, teacher_id) VALUES (?, ?, ?)', (title, description, teacher_id))
+        self.connection.commit()
+
+    def add_schedule(self, course_id, date, time, location):
+        self.cursor.execute('INSERT INTO schedule (course_id, date, time, location) VALUES (?, ?, ?, ?)', (course_id, date, time, location))
+        self.connection.commit()
+
+    def add_homework(self, course_id, title, description, deadline):
+        self.cursor.execute('INSERT INTO homework (course_id, title, description, deadline) VALUES (?, ?, ?, ?)', (course_id, title, description, deadline))
+        self.connection.commit()
+
+    def get_courses(self):
+        self.cursor.execute('SELECT * FROM courses')
+        return self.cursor.fetchall()
+
+    def get_course_id_by_title(self, title):
+        self.cursor.execute('SELECT id FROM courses WHERE title = ?', (title,))
+        return self.cursor.fetchone()
+
+    def get_schedule(self):
+        self.cursor.execute('''
+            SELECT s.date, s.time, s.location, c.title 
+            FROM schedule s
+            JOIN courses c ON s.course_id = c.id
+        ''')
+        return self.cursor.fetchall()
+
+    def get_schedule_by_date(self, date):
+        self.cursor.execute('''
+            SELECT s.date, s.time, s.location, c.title 
+            FROM schedule s
+            JOIN courses c ON s.course_id = c.id
+            WHERE s.date = ?
+        ''', (date,))
+        return self.cursor.fetchall()
+
+    def get_all_unique_dates(self):
+        self.cursor.execute('SELECT DISTINCT date FROM schedule')
+        return [row[0] for row in self.cursor.fetchall()]
+
+    def get_homework(self, course_id):
+        self.cursor.execute('SELECT * FROM homework WHERE course_id = ?', (course_id,))
+        return self.cursor.fetchall()
+
+    def get_student_groups(self, student_id):
+        self.cursor.execute('SELECT group_name FROM student_groups WHERE student_id = ?', (student_id,))
+        return [row[0] for row in self.cursor.fetchall()]
+
+    def add_student_to_group(self, student_id, group_name):
+        self.cursor.execute('INSERT INTO student_groups (student_id, group_name) VALUES (?, ?)', (student_id, group_name))
+        self.connection.commit()
+
+    def get_homework_for_student(self, student_id):
+        # Получаем группы студента
+        groups = self.get_student_groups(student_id)
+        homework_list = []
+
+        for group in groups:
+            self.cursor.execute('''
+                SELECT h.* FROM homework h
+                JOIN courses c ON h.course_id = c.id
+                WHERE c.title = ?
+            ''', (group,))
+            homework_list.extend(self.cursor.fetchall())
+
+        return homework_list
+
+    def close(self):
+        self.connection.close()
+
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Система управления курсами")
+        self.setGeometry(100, 100, 400, 300)
+
+        # Создание элементов интерфейса
+        self.username_input = QtWidgets.QLineEdit(self)
+        self.username_input.setPlaceholderText("Логин")
+        self.username_input.setGeometry(50, 50, 300, 30)
+
+        self.password_input = QtWidgets.QLineEdit(self)
+        self.password_input.setPlaceholderText("Пароль")
+        self.password_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        self.password_input.setGeometry(50, 100, 300, 30)
+
+        self.role_combo = QtWidgets.QComboBox(self)
+        self.role_combo.addItems(["Преподаватель", "Студент"])
+        self.role_combo.setGeometry(50, 150, 300, 30)
+        self.role_combo.currentIndexChanged.connect(self.toggle_group_input)
+
+        self.group_input = QtWidgets.QLineEdit(self)
+        self.group_input.setPlaceholderText("Название группы (для студентов)")
+        self.group_input.setGeometry(50, 200, 300, 30)
+        self.group_input.setVisible(False)  # Скрываем поле для группы по умолчанию
+
+        self.register_button = QtWidgets.QPushButton("Регистрация", self)
+        self.register_button.setGeometry(50, 250, 140, 30)
+        self.register_button.clicked.connect(self.register)
+
+        self.login_button = QtWidgets.QPushButton("Вход", self)
+        self.login_button.setGeometry(210, 250, 140, 30)
+        self.login_button.clicked.connect(self.login)
+
+        self.db = Database()
+
+    def toggle_group_input(self):
+        # Отображаем или скрываем поле для ввода группы в зависимости от выбранной роли
+        if self.role_combo.currentText() == "Студент":
+            self.group_input.setVisible(True)
+        else:
+            self.group_input.setVisible(False)
+            self.group_input.clear()  # Очищаем поле, если оно скрыто
+
+    def register(self):
+        username = self.username_input.text()
+        password = self.password_input.text()
+        role = 'teacher' if self.role_combo.currentText() == 'Преподаватель' else 'student'
+        group_name = self.group_input.text() if role == 'student' else None
+
+        if role == 'student' and not group_name:
+            QMessageBox.warning(self, 'Ошибка', 'Пожалуйста, введите название группы.')
+            return
+
+        if self.db.register_user(username, password, role):
+            if role == 'student':
+                student_id = self.db.login_user(username, password)[0]  # Получаем ID студента
+                self.db.add_student_to_group(student_id, group_name)  # Добавляем студента в группу
+            QMessageBox.information(self, 'Успех', 'Регистрация прошла успешно!')
+        else:
+            QMessageBox.warning(self, 'Ошибка', 'Пользователь с таким логином уже существует.')
+
+    def login(self):
+        username = self.username_input.text()
+        password = self.password_input.text()
+        user = self.db.login_user(username, password)
+
+        if user:
+            QMessageBox.information(self, 'Успех', f'Добро пожаловать, {user[1]}!')
+            if user[3] == 'student':
+                self.create_student_window(user[0])  # Передаем ID студента
+            else:
+                self.create_teacher_window()
+        else:
+            QMessageBox.warning(self, 'Ошибка', 'Неверный логин или пароль.')
+
+    def create_teacher_window(self):
+        self.teacher_window = QtWidgets.QWidget()
+        self.teacher_window.setWindowTitle("Создание курса")
+        self.teacher_window.setGeometry(100, 100, 400, 400)
+
+        self.course_title_input = QtWidgets.QLineEdit(self.teacher_window)
+        self.course_title_input.setPlaceholderText("Название курса")
+        self.course_title_input.setGeometry(50, 50, 300, 30)
+
+        self.course_description_input = QtWidgets.QTextEdit(self.teacher_window)
+        self.course_description_input.setPlaceholderText("Описание курса")
+        self.course_description_input.setGeometry(50, 100, 300, 100)
+
+        self.date_input = QtWidgets.QLineEdit(self.teacher_window)
+        self.date_input.setPlaceholderText("Дата (YYYY-MM-DD)")
+        self.date_input.setGeometry(50, 210, 300, 30)
+
+        self.time_input = QtWidgets.QLineEdit(self.teacher_window)
+        self.time_input.setPlaceholderText("Время (HH:MM)")
+        self.time_input.setGeometry(50, 250, 300, 30)
+
+        self.add_course_button = QtWidgets.QPushButton("Добавить курс", self.teacher_window)
+        self.add_course_button.setGeometry(50, 290, 140, 30)
+        self.add_course_button.clicked.connect(self.add_course)
+
+        self.view_schedule_button = QtWidgets.QPushButton("Просмотр расписания", self.teacher_window)
+        self.view_schedule_button.setGeometry(210, 290, 140, 30)
+        self.view_schedule_button.clicked.connect(self.view_schedule)
+
+        self.create_homework_button = QtWidgets.QPushButton("Добавить домашнее задание", self.teacher_window)
+        self.create_homework_button.setGeometry(50, 330, 300, 30)
+        self.create_homework_button.clicked.connect(self.create_homework_window)
+
+        self.view_homework_button = QtWidgets.QPushButton("Просмотр домашних заданий", self.teacher_window)
+        self.view_homework_button.setGeometry(50, 370, 300, 30)
+        self.view_homework_button.clicked.connect(self.view_homework)
+
+        self.teacher_window.show()
+
+    def create_student_window(self, student_id):
+        self.student_window = QtWidgets.QWidget()
+        self.student_window.setWindowTitle("Студенческое меню")
+        self.student_window.setGeometry(100, 100, 400, 400)
+
+        self.view_homework_button = QtWidgets.QPushButton("Просмотр домашних заданий", self.student_window)
+        self.view_homework_button.setGeometry(50, 50, 300, 30)
+        self.view_homework_button.clicked.connect(lambda: self.view_homework(student_id))  # Передаем ID студента
+
+        self.student_window.show()
+
+    def add_course(self):
+        title = self.course_title_input.text()
+        description = self.course_description_input.toPlainText()
+        teacher_id = 1  # временно, заменить на реальный идентификатор преподавателя
+        date = self.date_input.text()
+        time = self.time_input.text()
+
+        self.db.add_course(title, description, teacher_id)
+        course_id = self.db.get_course_id_by_title(title)[0]  # Получаем ID курса
+
+        # Добавляем расписание
+        self.db.add_schedule(course_id, date, time, "Класс 101")  # Замените "Класс 101" на нужное место
+
+        QMessageBox.information(self, 'Успех', 'Курс и расписание добавлены успешно!')
+
+    def create_homework_window(self):
+        self.homework_window = QtWidgets.QWidget()
+        self.homework_window.setWindowTitle("Добавить домашнее задание")
+        self.homework_window.setGeometry(100, 100, 400, 300)
+
+        self.homework_course_input = QtWidgets.QLineEdit(self.homework_window)
+        self.homework_course_input.setPlaceholderText("Название курса")
+        self.homework_course_input.setGeometry(50, 50, 300, 30)
+
+        self.homework_title_input = QtWidgets.QLineEdit(self.homework_window)
+        self.homework_title_input.setPlaceholderText("Название задания")
+        self.homework_title_input.setGeometry(50, 100, 300, 30)
+
+        self.homework_description_input = QtWidgets.QTextEdit(self.homework_window)
+        self.homework_description_input.setPlaceholderText("Описание задания")
+        self.homework_description_input.setGeometry(50, 150, 300, 100)
+
+        self.deadline_input = QtWidgets.QLineEdit(self.homework_window)
+        self.deadline_input.setPlaceholderText("Срок сдачи (YYYY-MM-DD)")
+        self.deadline_input.setGeometry(50, 260, 300, 30)
+
+        self.add_homework_button = QtWidgets.QPushButton("Добавить задание", self.homework_window)
+        self.add_homework_button.setGeometry(50, 300, 140, 30)
+        self.add_homework_button.clicked.connect(self.add_homework)
+
+        self.back_button = QtWidgets.QPushButton("← Назад", self.homework_window)
+        self.back_button.setGeometry(210, 300, 140, 30)
+        self.back_button.clicked.connect(self.show_course_window)
+
+        self.homework_window.show()
+
+    def show_course_window(self):
+        self.homework_window.close()  # Закрываем текущее окно домашних заданий
+        self.create_teacher_window()   # Открываем окно создания курса
+
+    def add_homework(self):
+        course_title = self.homework_course_input.text()
+        course_id = self.db.get_course_id_by_title(course_title)
+
+        if course_id is None:
+            QMessageBox.warning(self, 'Ошибка', 'Курс с таким названием не найден.')
+            return
+
+        title = self.homework_title_input.text()
+        description = self.homework_description_input.toPlainText()
+        deadline = self.deadline_input.text()
+        self.db.add_homework(course_id[0], title, description, deadline)
+        QMessageBox.information(self, 'Успех', 'Домашнее задание добавлено успешно!')
+
+    def view_homework(self, student_id):
+        self.homework_view_window = QtWidgets.QWidget()
+        self.homework_view_window.setWindowTitle("Домашние задания")
+        self.homework_view_window.setGeometry(100, 100, 600, 400)
+
+        # Таблица для отображения домашних заданий
+        self.homework_table = QtWidgets.QTableWidget(self.homework_view_window)
+        self.homework_table.setGeometry(50, 60, 500, 300)
+        self.homework_table.setRowCount(0)
+        self.homework_table.setColumnCount(4)
+        self.homework_table.setHorizontalHeaderItem(0, QTableWidgetItem("ID"))
+        self.homework_table.setHorizontalHeaderItem(1, QTableWidgetItem("Название"))
+        self.homework_table.setHorizontalHeaderItem(2, QTableWidgetItem("Описание"))
+        self.homework_table.setHorizontalHeaderItem(3, QTableWidgetItem("Срок сдачи"))
+
+        self.back_button = QtWidgets.QPushButton("← Назад", self.homework_view_window)
+        self.back_button.setGeometry(50, 370, 500, 30)
+        self.back_button.clicked.connect(self.homework_view_window.close)
+
+        self.load_homework(student_id)  # Загружаем домашние задания для студента
+
+        self.homework_view_window.show()
+
+    def load_homework(self, student_id):
+        homework_list = self.db.get_homework_for_student(student_id)
+
+        for row, homework in enumerate(homework_list):
+            self.homework_table.insertRow(row)
+            self.homework_table.setItem(row, 0, QTableWidgetItem(str(homework[0])))
+            self.homework_table.setItem(row, 1, QTableWidgetItem(homework[2]))
+            self.homework_table.setItem(row, 2, QTableWidgetItem(homework[3]))
+            self.homework_table.setItem(row, 3, QTableWidgetItem(homework[4]))
+
+    def view_schedule(self):
+        self.schedule_window = QtWidgets.QWidget()
+        self.schedule_window.setWindowTitle("Расписание")
+        self.schedule_window.setGeometry(100, 100, 600, 400)
+
+        # Создаем выпадающий список для выбора даты
+        self.date_combo = QtWidgets.QComboBox(self.schedule_window)
+        self.date_combo.setGeometry(50, 20, 300, 30)
+        self.date_combo.addItems(self.db.get_all_unique_dates())  # Заполняем уникальными датами
+
+        # Кнопка для фильтрации расписания
+        self.filter_button = QtWidgets.QPushButton("Фильтровать", self.schedule_window)
+        self.filter_button.setGeometry(370, 20, 140, 30)
+        self.filter_button.clicked.connect(self.load_schedule)
+
+        # Таблица для отображения расписания
+        self.schedule_table = QtWidgets.QTableWidget(self.schedule_window)
+        self.schedule_table.setGeometry(50, 60, 500, 300)
+        self.schedule_table.setRowCount(0)
+        self.schedule_table.setColumnCount(4)
+        self.schedule_table.setHorizontalHeaderItem(0, QTableWidgetItem("Дата"))
+        self.schedule_table.setHorizontalHeaderItem(1, QTableWidgetItem("Время"))
+        self.schedule_table.setHorizontalHeaderItem(2, QTableWidgetItem("Место"))
+        self.schedule_table.setHorizontalHeaderItem(3, QTableWidgetItem("Курс"))
+
+        self.back_button = QtWidgets.QPushButton("← Назад", self.schedule_window)
+        self.back_button.setGeometry(50, 370, 500, 30)
+        self.back_button.clicked.connect(self.show_course_window)
+
+        self.schedule_window.show()
+
+    def load_schedule(self):
+        date = self.date_combo.currentText()  # Получаем выбранную дату
+        schedule_list = self.db.get_schedule_by_date(date)  # Фильтруем расписание по выбранной дате
+
+        self.schedule_table.setRowCount(0)  # Очищаем таблицу перед загрузкой новых данных
+
+        if not schedule_list:
+            QMessageBox.warning(self, 'Ошибка', 'Нет занятий на указанную дату.')
+            return
+
+        for row, schedule in enumerate(schedule_list):
+            self.schedule_table.insertRow(row)
+            self.schedule_table.setItem(row, 0, QTableWidgetItem(schedule[0]))
+            self.schedule_table.setItem(row, 1, QTableWidgetItem(schedule[1]))
+            self.schedule_table.setItem(row, 2, QTableWidgetItem(schedule[2]))
+            self.schedule_table.setItem(row, 3, QTableWidgetItem(schedule[3]))
+
+if __name__ == '__main__':
+    app = QtWidgets.QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
